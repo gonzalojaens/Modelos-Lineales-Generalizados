@@ -1,0 +1,1483 @@
+---
+title: "Práctica de MGLz temas 3-4"
+author: "Gonzalo Jaén & Jovan Pomar & Juan Ignacio Sampere"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    theme: cerulean
+    toc: yes
+    toc_float:
+      collapsed: true
+    number_sections: false  
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE)     # Show code?
+knitr::opts_chunk$set(fig.width=10)  # Fig.width
+knitr::opts_chunk$set(fig.height=9)  # Fig.height
+```
+
+# Introducción
+
+## 1. Enunciado y objetivos
+
+Cada vez se utilizan más los datos recopilados en las visitas a los centros de atención primaria (Electronic Health Records). Estos datos pueden ser útiles tanto para mejorar el diagnóstico, el pronóstico y el tratamiento de los pacientes como para optimizar la gestión del propio centro sanitario. En este caso, nos centraremos en una cohorte de pacientes asmáticos que han sido seguidos durante un mínimo de un año y hasta un máximo de 5 años. A todos los pacientes se les solicitó participar en el estudio y se les instó a realizar una visita inicial para obtener su consentimiento informado. Las visitas posteriores de estos pacientes a los centros de atención primaria fueron voluntarias y se registraron durante el período del estudio. Estas visitas pueden deberse a un control rutinario del proceso de la enfermedad o a un empeoramiento del estado del paciente debido a una crisis respiratoria. <br>
+
+Tenemos un conjunto de datos del archivo **dades_37.txt** que contiene la información de 500 pacientes con 9 variables descritas a continuación.
+
+**Variables explicativas**
+
+- $ID$: identificador del paciente.
+- $visites_{prev}$: si el paciente había tenido visitas al sistema sanitario previas al inicio del estudio (no/sí).
+- $sexe$: hombre/mujer.
+- $FEV$: volumen espiratorio forzado en el primer segundo, resultado de la espirometría en la visita inicial (los valores normales se sitúan entre 80 y 120).
+- $edat$: edad de la persona en años.
+- $PAS$: presión arterial sistólica de la persona en la última medición disponible.
+- $temps$: tiempo de seguimiento en días (tiempo desde la visita inicial hasta la finalización del estudio). <br>
+
+**Variables respuesta**
+
+- $n$: número de visitas realizadas durante el período de seguimiento.
+- $y$: si el paciente realizó alguna visita ($n > 0$) o no ($n = 0$) al sistema sanitario durante el período de estudio. <br>
+
+Nuestros objetivos son saber cuáles son los factores explicativos de las visitas por asma a los centros médicos de una determinada región de Cataluña y hacer predicciones sobre el hecho de acudir a alguna visita y sobre el número de futuras visitas en una población futura de pacientes con asma. Conseguiremos nuestros objetivos mediante la modelización de nuestros datos con un modelo de respuesta binaria para $y$ y con un modelo de recuentos para $n$.
+
+## 2. Ánalisis descriptivo
+
+```{r setup, warning=FALSE, message=FALSE}
+#Cargamos las librerias
+library(car)
+library(MASS)
+library(AER)
+library(effects)
+library(lmtest)
+library(FactoMineR)
+library(rms)
+library(fmsb)
+library(ROCR)
+library(AUC)
+library(emmeans)
+library(multcomp)
+library(multcompView)
+library(glmmTMB)
+library(pROC)
+```
+
+Visualizemos los datos con los que vamos a trabajar
+
+```{r}
+datos <- read.table("dades_37.txt", header = TRUE, sep = "\t")
+
+str(datos)
+```
+
+### 2.1 Univariante
+
+```{r}
+summary(datos)
+```
+
+Arreglamos los datos en cuestión, pasando las variables categóricas a factores y categorizando las contínuas por sus cuartiles. <br>
+También añadimos $log(temps)$ que servirá de *offset* en la parte de recuentos.
+
+```{r}
+# variables categóricas
+datos$sexe <- as.factor(datos$sexe)
+datos$visites_prev <- as.factor(datos$visites_prev)
+datos$y <- as.factor(datos$y)
+
+# variables contínuas categorizadas
+datos$c.FEV <- cut(datos$FEV, breaks=c(49,80,100,120,150))
+datos$c.edat <- cut(datos$edat, breaks=c(17,36,48,62,99))
+datos$c.PAS <- cut(datos$PAS, breaks=c(81,111,120,130,159))
+datos$c.temps <- cut(datos$temps, breaks=c(370,736,1089,1435,1823))
+
+# variables offset
+datos$logtemps <- log(datos$temps)
+
+# variable no usada
+datos$ID <- NULL
+
+summary(datos)
+```
+Observaciones: Hay variabilidad considerable en la función pulmonar (`FEV`) y la presión arterial (`PAS`), lo que podría influir en las visitas.El tiempo de seguimiento es uniforme entre los pacientes, lo que facilita el análisis del impacto del tiempo en el número de visitas.La alta asimetría en la distribución de las visitas sugiere que será necesario usar un modelo que tenga en cuenta esta dispersión, como una regresión binomial negativa.
+
+
+Veamos que las nuevas variables categorizadas están bien balanceadas.
+
+```{r}
+par(mfrow=c(2,2),las=2)
+barplot(table(datos$c.FEV))
+barplot(table(datos$c.edat))
+barplot(table(datos$c.PAS))
+barplot(table(datos$c.temps))
+```
+
+El primer gráfico muestra cómo se distribuyen los pacientes según su función pulmonar, permitiendo identificar si predominan valores bajos, normales o altos.
+
+El segundo presenta la distribución por rangos de edad, útil para evaluar si la muestra es equilibrada en este aspecto.
+
+El tercer gráfico ilustra la distribución de presión arterial en cuartiles, destacando posibles desequilibrios en los valores de presión. 
+
+Por último, el cuarto gráfico visualiza cómo se reparten los pacientes en términos de tiempo de seguimiento.
+
+### 2.2 Bivariante {.tabset}
+
+#### Variable respuesta *y*
+
+ 
+```{r}
+(response <- which(names(datos)=='y'))
+catdes(datos,response)
+```
+El análisis muestra que las variables `c.FEV`, `sexe` y `visites_prev` están significativamente asociadas con los clústeres ($p<0.05$). En el Clúster 0, predominan los valores más bajos de `c.FEV` $(49,80]$,$ p=1.12×10^{−21}$, mujeres y personas que no realizaron visitas previas. En contraste, el Clúster 1 está caracterizado por valores altos de `c.FEV` $(120,150]$, $p=3.28×10^{−25}$, hombres y personas con visitas previas.
+
+En cuanto a las variables cuantitativas, `FEV` es la más discriminante, con un $\eta^2$ de $0.319$ ($p=1.71×10^{−43}$). En el Clúster 0, el promedio de `FEV` es más bajo ($86.02$) y la variable $n$ está ausente ($n=0$). Por el contrario, en el Clúster 1, FEV tiene un promedio mayor ($117.89$) y $n$ alcanza valores altos ($8.89$).
+
+En conclusión, los clústeres se diferencian principalmente por `FEV`, el *sexo* y las *visitas previas*, siendo estos factores claves para la segmentación de los grupos.
+
+```{r}
+par(mfrow=c(2,2),las=1)
+Boxplot(FEV~y, data = datos, col=2:3)
+Boxplot(edat~y,data = datos, col=2:3)
+Boxplot(PAS~y, data = datos, col=2:3)
+Boxplot(temps~y,data = datos, col=2:3)
+```
+1. `FEV` 
+El Cluster 1 (verde) predomina en valores altos de `FEV` (120-150), destacando su importancia como principal diferenciador entre grupos.
+
+2. Edad
+No se observan diferencias claras entre clusters en los rangos de edad, indicando que no es un factor relevante.
+
+3. Presión Arterial Sistólica
+Las proporciones de los clusters son similares en todos los rangos de `PAS`, mostrando poca influencia en la diferenciación.
+
+4. Tiempo de Seguimiento
+El Cluster 1 tiene una ligera tendencia a tiempos de seguimiento más largos, aunque con poca relevancia.
+
+Conclusión
+El `FEV` es la variable clave que distingue los clusters, mientras que las demás tienen diferencias menores o poco significativas.
+
+```{r}
+par(mfrow=c(2,2),las=2)
+plot(y~c.FEV, data = datos, col=3:2)
+plot(y~c.edat, data = datos, col=3:2)
+plot(y~c.PAS, data = datos, col=3:2)
+plot(y~c.temps, data = datos, col=3:2)
+```
+
+Las gráficas muestran una distribución equilibrada de las variables categorizadas. En `c.FEV`, destaca un predominio en el rango más bajo (49,80], indicando posible relación con mayor gravedad del asma. La variable `c.edat` refleja una ligera mayor frecuencia en el grupo más joven (17,36], mientras que `c.PAS` y `c.temps` presentan distribuciones uniformes, sin sesgos evidentes. Esto asegura una muestra representativa y permite identificar patrones clave en los pacientes asmáticos.
+
+```{r}
+par(mfrow=c(1,2),las=1)
+plot(y~sexe, data = datos, col=3:2)
+plot(y~visites_prev, data = datos, col=3:2)
+```
+
+En el primer gráfico, la variable y muestra diferencias según el sexo. Los hombres tienen una proporción más alta de valores y=1 (verde) en comparación con las mujeres, lo que sugiere que ser hombre podría estar relacionado con un resultado positivo en la variable respuesta.
+
+Y por último, en el segundo gráfico, quienes tuvieron visitas previas también presentan una proporción más alta de valores y=1 (verde) en comparación con aquellos sin visitas previas. Esto indica que las visitas previas podrían estar asociadas con una mayor probabilidad de obtener un resultado positivo en y.
+
+#### Variable respuesta n
+ 
+```{r}
+par(mfrow=c(3,2), las=1)
+
+boxplot(n ~ sexe, data = datos, main = "sexe")
+boxplot(n ~ visites_prev, data = datos, main = "visites_prev")
+boxplot(n ~ c.FEV, data = datos, main = "FEV")
+boxplot(n ~ c.edat, data = datos, main = "edat")
+boxplot(n ~ c.PAS, data = datos, main = "PAS")
+
+hist(datos$n)
+```
+
+En el gráfico de sexo, no hay grandes diferencias en el número de visitas médicas entre hombres y mujeres, aunque la mediana es ligeramente mayor para los hombres. Ambos grupos presentan valores atípicos, sugiriendo que el sexo no es un factor determinante.
+
+En el gráfico de visitas previas, los pacientes con visitas previas muestran una mayor mediana, mayor rango y más valores atípicos en comparación con aquellos sin visitas, quienes tienen un número consistentemente bajo. Esto sugiere que el contacto previo con el sistema de salud podría estar asociado con un manejo más intensivo.
+
+En cuanto al FEV, el número de visitas aumenta con un FEV mayor, especialmente en el rango 120-150, contradiciendo la expectativa de que menor FEV implique más visitas. Esto podría reflejar mejor acceso o seguimiento en pacientes con mejor función pulmonar.
+
+El gráfico de edad no muestra diferencias claras entre los grupos, con medianas similares y valores atípicos en todos los rangos. Esto indica que la edad no parece influir significativamente en el número de visitas médicas.
+
+Respecto a la presión arterial sistólica, no se evidencia una relación con el número de visitas, ya que las distribuciones son similares en todos los rangos, indicando un impacto probablemente irrelevante.
+
+Finalmente, el histograma de visitas revela que la mayoría realizó pocas visitas, con muchos casos de n = 0 y una cola hacia la derecha por pacientes con un alto número de visitas, destacando una distribución asimétrica.
+
+En resumen, las variables `visites_previes` y `FEV` son las más influyentes en el número de visitas, mientras que sexo, edad y presión arterial tienen menor relevancia. Esto subraya la importancia de un análisis estadístico para confirmar estas observaciones.
+
+---
+
+# Respuesta binaria
+
+## 1. Selección de variables
+
+### 1.1 Automática
+
+Ajustamos un modelo aditivo con todas las variables explicativas presentes en datos y el link *logit*.
+
+**Ajuste**
+
+```{r}
+summary(mod0 <- glm(y ~ sexe + visites_prev + FEV + edat + PAS + temps,datos, family=binomial(link = "logit")))
+```
+
+Observamos que son todas significativas salvo `PAS`.
+
+```{r}
+Anova(mod0, test.statistic = 'LR')
+```
+
+Hacemos una selección automática de las variables usando la función *step* y el criterio del *BIC*. Usamos este criterio porque es el que más penaliza el tener muchas variables.
+
+```{r}
+mod0.1 <- step(mod0,direction="both",k=log(nrow(datos)),trace=FALSE)
+summary(mod0.1)
+```
+```{r}
+Anova(mod0.1,test.statistic = 'LR')
+```
+
+**Comparación entre mod0 y mod0.1**
+
+```{r}
+anova(mod0.1,mod0,test = 'Chisq')
+```
+
+Efectivamente vemos que en *mod0.1* ya no tenemos en cuenta la variable `PAS`. Pero al comparar los tests vemos que no podemos rechazar la hipótesis nula ($H_0:$"Los modelos son significativamente iguales") y ambos modelos no son significativamente diferentes. A pesar de ello nos quedaríamos con el modelo que tiene menos parámetros, en este caso *mod0.1*.
+
+**Validación**
+
+```{r}
+residualPlots(mod0.1,layout=c(2,3))
+```
+
+Vemos que podemos intentar encontrar un modelo que ajuste mejor los datos de forma manual (sobretodo para a variable `FEV`).
+
+### 1.2 Manual
+
+En este apartado procederemos de la siguiente manera. <br>
+Para cada variable contínua (salvo el `PAS` que ya hemos visto que no es significativo) haremos dos modelos que se diferencian por su tratamiento de la variable: usando la variable contínua (A), categorizando la variable (B). Si alguno de los dos modelos se cree mejorable se probarán modelos polinomiales o con otras transformaciones (C,D,...). <br>
+Una vez comparados y validados los modelos para una variable procederemos a pasar a la segunda variable. Al los modelos de la siguiente variable se les añadirá la mejor opción de la variable anterior. Y así hasta acabar con las variable contínuas. <br>
+Faltarán entonces por añadir dos variables categóricas (`sexe` y `visites_prev`).
+
+#### 1.2.1 Variable *FEV*
+
+**Modelo con la variable contínua - mod1.1A**
+
+```{r}
+summary(mod1.1A <- glm(y ~ FEV, data = datos, family = binomial(link = "logit")))
+```
+La variable `FEV` es significativa.
+
+**Modelo con la variable categorizada - mod1.1B**
+
+```{r}
+summary(mod1.1B <- glm(y ~ c.FEV, data = datos, family = binomial(link = "logit")))
+```
+
+Los distintos niveles de la variable `FEV` son significativos. Para comprobarlo realizamos la siguiente comprobación:
+
+```{r}
+cld(emmeans(mod1.1B, ~c.FEV))
+```
+
+Observando el AIC de ambos modelos nos quedamos con *mod1.1A*, es decir con el de la variable contínua ya que tiene el AIC más bajo.
+
+**Validación gráfica**
+
+```{r}
+residualPlot(mod1.1A)
+```
+
+Vemos que podemos optar a probar transformaciones. En este caso las transformaciones que llevaremos a cabo son:
+\[
+FEV2=FEV^2\\
+FEV3=FEV^3
+\]
+
+**Modelos con transformaciones**
+
+```{r}
+datos$FEV2 <- (datos$FEV)^2
+datos$FEV3 <- (datos$FEV)^3
+```
+
+**Mod1.1C**
+```{r}
+summary(mod1.1C <- glm(y ~ FEV + FEV2, data = datos, family = binomial(link = "logit")))
+```
+
+**Mod1.1D**
+```{r}
+summary(mod1.1D <- glm(y ~ FEV + FEV2 + FEV3, data = datos, family = binomial(link = "logit")))
+```
+
+**Mod1.1E**
+```{r}
+summary(mod1.1E <- glm(y ~ FEV2, data = datos, family = binomial(link = "logit")))
+```
+
+**Mod1.1F**
+```{r}
+summary(mod1.1F <- glm(y ~ FEV3, data = datos, family = binomial(link = "logit")))
+```
+
+**Comparación de modelos**
+
+```{r}
+cbind(AIC(mod1.1A,mod1.1B,mod1.1C,mod1.1D,mod1.1E,mod1.1F),
+      BIC=BIC(mod1.1A,mod1.1B,mod1.1C,mod1.1D,mod1.1E,mod1.1F)[,2])
+```
+
+Tanto según el AIC como el BIC escogemos el *mod1.1E*.
+
+**Validación numérica**
+
+```{r}
+mod1.1 <- mod1.1E
+Anova(mod1.1, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(sum(resid(mod1.1, 'pearson')^2),mod1.1$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de devianza es:",1-pchisq(mod1.1$dev,mod1.1$df.res))
+```
+
+Tanto con el estadístico de Pearson como con el de Devianza no podemos rechazar la hipótesis nula $H_0$:"Ajusta bien los datos." <br>
+Validamos el modelo.
+
+#### 1.2.2 Variable *edat*
+
+**Modelo con la variable contínua - mod1.2A**
+
+```{r}
+summary(mod1.2A <- glm(y ~ FEV2 + edat, data = datos, family = binomial(link = "logit")))
+```
+
+La variable `edat` es significativa.
+
+**Modelo con la variable categorizada - mod1.2B**
+
+```{r}
+summary(mod1.2B <- glm(y ~ FEV2 + c.edat, data = datos, family = binomial(link = "logit")))
+```
+
+Los distintos niveles de la variable categorizada edat (`c.edat`) no son significativos. Realizemos una comprobación:
+
+```{r}
+cld(emmeans(mod1.2B, ~c.edat))
+```
+
+Con la información de los estadísticos escogemos el modelo de variable contínua *mod1.2A*.
+
+**Validación gráfica**
+
+```{r}
+residualPlots(mod1.2A)
+```
+
+Observamos que en la variable `edat` no necesitamos aplicar transformaciones.
+
+**Comparación de modelos**
+
+```{r}
+cbind(AIC(mod1.2A,mod1.2B),
+      BIC=BIC(mod1.2A,mod1.2B)[,2])
+```
+
+**Validación numérica**
+
+```{r}
+mod1.2 <- mod1.2A
+anova(mod1.1, mod1.2, test = "Chisq")
+Anova(mod1.2, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(sum(resid(mod1.2, 'pearson')^2),mod1.2$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de la Devianza es:",1-pchisq(mod1.2$dev,mod1.2$df.res))
+
+```
+
+Observamos que los modelos *mod1.1* y *mod1.2* son significativamente diferentes (explica mejor el último).
+Tanto con el estadístico de Pearson como con el de Devianza no podemos rechazar la hipótesis nula $H_0$: "Ajusta bien los datos".
+
+#### 1.2.3 Variable *temps*
+
+**Modelo con la variable contínua - mod1.3A**
+
+```{r}
+summary(mod1.3A <- glm(y ~ FEV2 + edat + temps, data = datos, family = binomial(link = "logit")))
+```
+
+La variable `temps` es significativa.
+
+**Modelo con la variable categorizada - mod1.3B**
+
+```{r}
+summary(mod1.3B <- glm(y ~ FEV2 + edat + c.temps, data = datos, family = binomial(link = "logit")))
+```
+
+Los distintos niveles de la variable `temps` son significativos. Realizemos una comprobación:
+
+```{r}
+cld(emmeans(mod1.3B, ~c.temps))
+```
+
+
+Según los estadísticos escogemos *mod1.3A*
+
+**Validación gráfica**
+
+```{r}
+residualPlots(mod1.3A)
+```
+
+Observamos que en la variable `temps` no necesitamos aplicar transformaciones.
+
+**Comparación de modelos**
+
+```{r}
+cbind(AIC(mod1.3A,mod1.3B),
+      BIC=BIC(mod1.3A,mod1.3B)[,2])
+```
+
+**Validación numérica**
+
+```{r}
+mod1.3 <- mod1.3A
+anova(mod1.2, mod1.3, test = "Chisq")
+Anova(mod1.3, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(sum(resid(mod1.3, 'pearson')^2),mod1.3$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(mod1.3$dev,mod1.3$df.res))
+```
+
+Observamos que los modelos *mod1.2* y *mod1.3* son significativamente diferentes (explica mejor el último).
+Tanto con el estadístico de Pearson como con el de Devianza no podemos rechazar la hipótesis nula $H_0$:"Ajusta bien los datos".
+
+
+#### 1.2.4 Otras variables e interacciones
+
+**Ajuste**
+
+**Modelo con todas las intereacciones - mod1.4A**
+```{r}
+summary(mod1.4A <- glm(y ~ visites_prev + sexe + FEV2 + edat + temps +
+                      visites_prev:sexe + visites_prev:edat + visites_prev:FEV2 + visites_prev:temps +
+                      sexe:edat + sexe:FEV2 + sexe:temps, data = datos, family = binomial(link = "logit")))
+```
+
+Probando varias interacciones dos a dos entre variables (donde cómo mínimo hay una que es un factor) obtenemos que la única significativa es entre `sexe` y `edat`. Lo añadimos al último modelo (*mod1.4B*).
+
+```{r}
+summary(mod1.4B <- glm(y ~ visites_prev + sexe*edat + FEV2 + temps, data = datos, family = binomial(link = "logit")))
+```
+
+**Validación**
+
+```{r}
+mod1.4 <- mod1.4B
+anova(mod0.1, mod1.4, test = "Chisq")
+Anova(mod1.4, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(sum(resid(mod1.4, 'pearson')^2),mod1.4$df.res))
+
+# estadístico de la Devianza
+cat("El p-valor del estadístico de Devianza es:",1-pchisq(mod1.4$dev,mod1.4$df.res))
+
+```
+
+```{r}
+plot(mod1.4,1)
+residualPlots(mod1.4)
+```
+
+Validamos el modelo.
+
+**Comparativa de los modelos**
+
+```{r}
+cbind(AIC(mod0.1,mod1.1,mod1.2,mod1.3,mod1.4),
+      BIC=BIC(mod0.1,mod1.1,mod1.2,mod1.3,mod1.4)[,2])
+```
+
+Vemos cómo van bajando los estadísticos a medida que añadimos las variables explicativas pertinentes. <br>
+Nos quedamos de momento con *mod1.4*.
+
+## 2. Otras funciones links
+
+A continuación ajustaremos nuevos modelos con otras funciones links dadas las mismas variables seleccionadas en el apartado anterior y el modelo elegido.
+
+### 2.1 Función logit
+
+```{r}
+summary(mod2.1 <- mod1.4)
+```
+
+### 2.2 Función probit
+
+```{r}
+summary(mod2.2 <- glm(y ~ visites_prev + sexe*edat + FEV2 + temps, data = datos, family = binomial(link = "probit")))
+```
+
+### 2.3 Función complementaria log-log
+
+```{r}
+summary(mod2.3 <- glm(y ~ visites_prev + sexe*edat + FEV2 + temps, data = datos, family = binomial(link = "cloglog")))
+```
+
+### 2.4 Comparativa
+
+Comparamos los diferentes modelos según el AIC, el BIC y la log-verosimilitud.
+
+```{r}
+logLik_2.1=logLik(mod2.1)
+logLik_2.2=logLik(mod2.2)
+logLik_2.3=logLik(mod2.3)
+logLikmodelos <- c(logLik_2.1,logLik_2.2,logLik_2.3)
+cbind(AIC(mod2.1,mod2.2,mod2.3),
+      BIC=BIC(mod2.1,mod2.2,mod2.3)[,2],
+      logLik=logLikmodelos)
+```
+
+Deducimos que nos quedaremos con el *mod2.1* que es el del logit. Cae bien porque es el canónico y el más interpretable.
+
+## 3. Validación del modelo definitivo
+
+```{r}
+mod_bn <- mod2.1 # modelo final
+```
+
+### 3.1 Validación gráfica
+
+```{r}
+residualPlots(mod_bn, layout=c(3, 2))
+```
+
+
+La primera gráfica de residuos frente a valores ajustados verifica la homogeneidad de la varianza. Los puntos se dispersan de manera aleatoria alrededor de 0, sin patrones claros, sugiriendo varianza constante y ausencia de heterocedasticidad.
+
+La segunda gráfica Q-Q plot evalúa la normalidad de los residuos. La mayoría de los puntos siguen la línea diagonal, indicando que los residuos tienen una distribución aproximadamente normal.
+
+La tercera gráfica de residuos frente al índice observa si hay autocorrelación. No se aprecian patrones sistemáticos, lo que apoya la independencia de los residuos.
+
+Respecto a las otras tres gráficas: 
+La cuarta evalúa residuos estandarizados y no muestra valores extremos preocupantes.
+La quinta gráfica analiza apalancamiento y no presenta puntos influyentes importantes.
+La sexta revisa distancia de Cook y confirma que ningún punto tiene una influencia excesiva.
+
+Según estas observaciones, el modelo parece satisfacer las premisas requeridas para ser reconocido como válido.
+```{r}
+residualPlot(mod_bn)
+marginalModelPlot(mod_bn)
+```
+
+El primer gráfico muestra los residuos del modelo frente a los valores ajustados. Valida el modelo si los residuos se dispersan aleatoriamente alrededor de cero, sin patrones visibles ni formas sistemáticas. Esto sugiere linealidad, homogeneidad de varianza y ausencia de problemas de especificación en el modelo.
+
+El segundo gráfico evalúa la relación entre la variable respuesta y cada predictor en el modelo. Si las relaciones observadas son aproximadamente lineales, esto respalda la suposición de linealidad entre predictores y respuesta, validando el uso del modelo lineal ajustado.
+
+En conjunto, ambos gráficos confirmarían que los supuestos de linealidad y homocedasticidad se cumplen, justificando la validez del modelo seleccionado. A continuación tenemos más gráficos datos que nos sirven para validar definitivamente el modelo: 
+
+
+```{r}
+outlierTest(mod_bn)
+influenceIndexPlot(mod_bn,id=list(lab=row.names(datos),vars=c("Cook", "Student","hat"), n=5))
+influencePlot(mod_bn)
+```
+
+```{r}
+# Calibration plot
+calibration_plot <- function(modelo, datos) {
+  # Obtener probabilidades predichas y valores observados
+  probs <- predict(modelo, type = "response")
+  observed <- datos$y
+  
+  # Crear bins para las probabilidades predichas
+  bins <- cut(probs, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)
+  
+  # Calcular medias por bin
+  calibration <- data.frame(
+    Bin = levels(bins),
+    Mean_Prob = tapply(probs, bins, mean, na.rm = TRUE),
+    Observed = tapply(as.numeric(as.character(observed)), bins, mean, na.rm = TRUE),
+    Count = tapply(as.numeric(as.character(observed)), bins, length)
+  )
+  
+  # Calcular intervalos de confianza binomial
+  calibration$Lower_CI <- NA
+  calibration$Upper_CI <- NA
+  
+  for (i in 1:nrow(calibration)) {
+    if (!is.na(calibration$Observed[i]) && calibration$Count[i] > 0) {
+      binom_test <- binom.test(
+        x = round(calibration$Observed[i] * calibration$Count[i]), 
+        n = calibration$Count[i], 
+        conf.level = 0.95
+      )
+      calibration$Lower_CI[i] <- binom_test$conf.int[1]
+      calibration$Upper_CI[i] <- binom_test$conf.int[2]
+    }
+  }
+  
+  # Crear el gráfico con límites fijos
+  plot(
+    calibration$Mean_Prob, calibration$Observed, 
+    xlab = "Probabilidad Predicha", ylab = "Proporción Observada", 
+    main = "Calibration Plot", xlim = c(0, 1), ylim = c(0, 1),
+    pch = 16, col = "blue"  # Personalización de los puntos
+  )
+  
+  # Añadir la línea de identidad
+  abline(0, 1, col = "red", lwd = 2, lty = 2)
+  
+  # Añadir barras de error
+  for (i in 1:nrow(calibration)) {
+    if (!is.na(calibration$Lower_CI[i]) && !is.na(calibration$Upper_CI[i])) {
+      arrows(
+        x0 = calibration$Mean_Prob[i], 
+        y0 = calibration$Lower_CI[i], 
+        x1 = calibration$Mean_Prob[i], 
+        y1 = calibration$Upper_CI[i],
+        code = 3, angle = 90, length = 0.05, col = "blue", lwd = 1.5
+      )
+    }
+  }
+}
+
+calibration_plot(mod_bn, datos)
+```
+
+La gráfica de calibración muestra que las probabilidades predichas se alinean bien con las proporciones observadas.
+
+La mayoría de los puntos están cerca de la línea roja de identidad, lo que indica que el modelo está bien calibrado y sus predicciones representan con precisión la realidad observada.
+
+Los intervalos de confianza son razonables y no se desvían drásticamente de la línea diagonal, sugiriendo que las diferencias entre valores predichos y observados pueden deberse al azar.
+
+En general, esta gráfica valida el modelo al demostrar que las predicciones son fiables y no están sesgadas.
+
+
+### 3.2 Validación numérica
+
+```{r}
+Anova(mod_bn, test.statistics = "Wald")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson es:",1-pchisq(sum(resid(mod_bn, 'pearson')^2),mod_bn$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de la Devianza es:",1-pchisq(mod_bn$dev,mod_bn$df.res))
+
+```
+
+Este análisis de devianza evalúa la significancia estadística de las variables en el modelo mediante el test de Wald.
+Los p-valores muestran que todas las variables incluidas son significativas, ya que tienen valores menores a $0.05$. En particular, `visites_prev` y `FEV2` son altamente significativas $(p < 0.001)$, lo que indica que están fuertemente asociadas con la variable respuesta.
+Variables como `sexe`, `edat` y `temps` también son significativas $(p < 0.01)$, sugiriendo que influyen en la respuesta, aunque en menor medida. Además, la interacción `sexe:edat` también es significativa, destacando un efecto combinado entre sexo y edad.
+
+El estadístico de Pearson tiene un valor p de 0.1512, indicando que no hay evidencia de falta de ajuste en el modelo.
+
+El estadístico de devianza muestra un valor p de 0.9388, lo que respalda aún más que el modelo se ajusta bien a los datos sin problemas significativos.
+
+En conjunto, estos resultados numéricos confirman la validez del modelo, tanto en términos de significancia de los predictores como en la calidad del ajuste.
+
+
+## 4. Predicción del modelo definitivo
+
+### 4.1 Capacidad predictiva
+
+Construimos la matriz de confusión.
+
+```{r}
+prob.vot <- mod_bn$fit
+pres.est <- ifelse(prob.vot<0.5,0,1)
+(t <- table(pres.est,datos$y))
+```
+
+```{r}
+cat("La proporción(porcentaje) de acierto es ",sum(diag(t))/sum(t)) # proporción de acierto
+cat("La sensibilidad vale ",t[2,2]/sum(t[,2]))   # sensibilidad
+cat("La especificidad vale ",t[1,1]/sum(t[,1]))   # especificidad
+cat("El valor predictivo positivo es",t[2,2]/sum(t[2,]))   # Valor Predictivo Positivo
+cat("El valor predictivo negativo es",t[1,1]/sum(t[1,]))   # Valor Predictivo Negativo
+```
+
+La sensibilidad es del 75%, lo que significa que el modelo identifica correctamente el 75% de los casos positivos (clase 1).
+
+La especificidad es del 85.7%, reflejando una alta capacidad para detectar correctamente los casos negativos (clase 0).
+
+El valor predictivo positivo es del 80.5%, lo que indica que, de las predicciones positivas realizadas, el 80.5% son realmente positivas.
+
+El valor predictivo negativo es del 81.4%, señalando que el 81.4% de las predicciones negativas son correctas.
+
+En conjunto, estos resultados muestran que el modelo tiene un equilibrio aceptable entre sensibilidad y especificidad, y su capacidad predictiva es sólida para este conjunto de datos.
+
+```{r}
+# Modelo naive
+m0 <- glm(y ~ 1, data=datos, family=binomial(link = "logit"))
+prob.vot <- m0$fit
+pres.est <- ifelse(prob.vot<0.5,0,1)
+t2 <- table(pres.est,datos$y)
+cat("El porcentaje de acierto naive es ",t2[1,2]/sum(t2))
+```
+
+El porcentaje de acierto de nuestro modelo es del 81% que es casi el doble del porcentaje del modelo naive: 44%.
+
+```{r}
+# Predicciones en escala de probabilidad
+probs <- predict(mod_bn, type = "response")
+
+# Crear el objeto predicción con ROCR
+pred <- prediction(probs, datos$y)
+
+# Calcular la curva ROC
+perf <- performance(pred, "tpr", "fpr") # Tasa de verdaderos positivos vs. falsos positivos
+
+# Graficar la curva ROC
+plot(perf, col = "blue", lwd = 2, main = "Curva ROC del Modelo Binario")
+abline(a = 0, b = 1, lty = 2, col = "gray") # Línea diagonal (azar)
+
+# Calcular el área bajo la curva (AUC) con ROCR
+auc_perf <- performance(pred, "auc")
+auc_value <- as.numeric(auc_perf@y.values)
+cat("El área bajo la curva (AUC) es:", round(auc_value, 3), "")
+```
+
+
+Concluímos que como $0.8<0.87<0.9$ nuestro modelo es muy bueno prediciendo.
+
+### 4.2 Interpretaciones
+
+#### 4.2.1 Interpretación gráfica
+
+```{r}
+plot(allEffects(mod_bn))
+```
+
+El primer gráfico, arriba a la izquierda, existe un aumento claro en el valor promedio de "y" al pasar de "no" (aproximadamente 0.2) a "si" (cerca de 0.5), indicando que el grupo con visitas previas tiene valores de "y" más altos. Aunque las barras de error presentan una ligera superposición, la diferencia entre los grupos parece significativa, sugiriendo una relación positiva entre haber tenido visitas previas y el resultado medido.
+
+En el segundo (arriba a la derecha) observamos que a medida que `FEV2` aumenta, también lo hace $y$, lo cual está representado por la línea azul de ajuste. La franja sombreada azul claro indica el intervalo de confianza, mostrando mayor incertidumbre en los extremos del rango. Las marcas en el eje inferior reflejan la distribución de los datos, con mayor densidad entre 5,000 y 15,000. Este gráfico sugiere que `FEV2` tiene un impacto positivo y significativo en `y`, siendo útil en análisis de regresión o modelos estadísticos.
+
+La gráfica que ilustra la relación positiva entre la variable `temps` y la variable dependiente `y` muestra que a medida que los valores de "temps" aumentan, también lo hace `y`, como lo indica la línea azul de ajuste. La franja sombreada azul claro representa el intervalo de confianza, que se ensancha hacia los extremos, sugiriendo mayor incertidumbre en esas áreas. Las marcas en el eje inferior muestran la distribución de los datos, con una dispersión más uniforme en el rango analizado. En conjunto, el gráfico sugiere un efecto positivo de `temps` sobre `y`, útil para interpretar el impacto de esta variable en un modelo estadístico.
+
+
+
+En la última gráfica que muestra el efecto combinado entre `sexe` y `edat` sobre la variable dependiente `y`. Se divide en dos paneles: uno para `sexe = dona` y otro para `sexe = home`.
+
+En el panel izquierdo (`sexe = dona`), se observa una relación positiva entre `edat` y `y`, donde a medida que aumenta `edat`, también lo hace el valor de `y`. La franja azul claro alrededor de la línea de ajuste indica el intervalo de confianza, ampliándose en los extremos, lo que refleja mayor incertidumbre en esas áreas.
+
+En el panel derecho (`sexe = home`), la relación entre `edat` y `y` es casi neutra o ligeramente negativa, mostrando que el aumento en `edat` no tiene un impacto significativo en `y`. La franja de confianza es más amplia, lo que sugiere una mayor variabilidad en los datos.
+
+En resumen, el efecto de `edat` sobre `y` varía según `sexe`, siendo positivo y significativo en `sexe = dona`, mientras que en `sexe = home` es más plano o ligeramente decreciente.
+
+
+
+#### 4.2.2 Interpretación numérica
+
+```{r}
+coef(mod_bn)
+```
+
+Tenemos en el predictor lineal,
+\[
+\begin{align}
+logit(y)&= log(\frac{y}{1-y}) = -8.07 + 1.41visites_{prev} + 2.84sexe_{home} + 0.0373edat + 0.000318FEV^2 \\
+&+ 0.000881temps -0.0420sexe_{home}:edat
+\end{align}
+\]
+Así pues para obtener nuestras estimaciones debemos elevar los coeficientes con la exponencial.
+
+
+Los coeficientes de la ecuación representan cambios en el **log-odds** por unidad de cambio en las variables independientes, manteniendo constantes las demás. Los **odds ratios** (\(e^{\text{coeficiente}}\)) permiten interpretar los resultados en términos de probabilidades relativas.
+
+---
+
+**Ejemplos de log-odds**
+
+1. **`visites_prev` (1.41):**
+   - Si una persona tiene visitas previas (\(visites_{prev} = 1\)) en comparación con no tener visitas (\(visites_{prev} = 0\)), el **logit** de \(y\) aumenta en 1.41 unidades.
+   - Esto implica que las visitas previas incrementan considerablemente las probabilidades de \(y\).
+
+2. **`sexe_home` (2.84):**
+   - Ser hombre (\(sexe_{home} = 1\)) en lugar de mujer (\(sexe_{home} = 0\)) incrementa el **logit** de \(y\) en 2.84 unidades.
+   - Esto indica una fuerte asociación positiva entre ser hombre y la probabilidad de \(y\).
+
+3. **`edat` (0.0373):**
+   - Por cada año adicional de edad, el **logit** de \(y\) aumenta en **0.0373** unidades.
+   - Esto implica un efecto positivo, aunque moderado, de la edad sobre la probabilidad de \(y\).
+
+4. **Interacción `sexe_home:edat` (-0.0420):**
+   - Para los hombres (\(sexe_{home} = 1\)), el efecto positivo de la edad sobre el logit de \(y\) disminuye en **0.0420** unidades por cada año adicional.
+   - Por ejemplo, un hombre de 50 años tendría un ajuste de \(-0.0420 \cdot 50 = -2.10\) en el logit de \(y\).
+
+---
+
+**Ejemplos de odds ratios**
+
+Los **odds ratios** se calculan elevando \(e\) al coeficiente:
+
+- **`visites_prev`**: \(e^{1.41} \approx 4.10\)
+- **`sexe_home`**: \(e^{2.84} \approx 17.13\)
+- **`edat`**: \(e^{0.0373} \approx 1.038\)
+- **`FEV^2`**: \(e^{0.000318} \approx 1.00032\)
+- **`temps`**: \(e^{0.000881} \approx 1.00088\)
+- **`sexe_home:edat`**: \(e^{-0.0420} \approx 0.959\)
+
+**Interpretaciones de los odds ratios**
+
+1. **`visites_prev` (OR = 4.10):**
+   - Las personas con visitas previas tienen **4.10 veces más probabilidades** de que ocurra \(y\) en comparación con aquellas sin visitas previas.
+
+2. **`sexe_home` (OR = 17.13):**
+   - Los hombres tienen **17.13 veces más probabilidades** de que ocurra \(y\) en comparación con las mujeres, manteniendo constantes las demás variables.
+
+3. **`edat` (OR = 1.038):**
+   - Por cada año adicional de edad, las probabilidades de que ocurra \(y\) aumentan en un **3.8%**.
+
+4. **`FEV^2` (OR = 1.00032):**
+   - Cada unidad adicional en el cuadrado de `FEV` incrementa las probabilidades de \(y\) ligeramente, con un efecto casi despreciable.
+
+5. **`temps` (OR = 1.00088):**
+   - Cada unidad adicional de tiempo incrementa las probabilidades de \(y\) en un **0.088%**.
+
+6. **Interacción `sexe_home:edat` (OR = 0.959):**
+   - Por cada año adicional de edad, las probabilidades de \(y\) para los hombres disminuyen en un **4.1%** (\(1 - 0.959 = 0.041\)), moderando el efecto positivo del sexo masculino.
+
+---
+
+*Conclusiones*
+
+La variable `sexe_home` tiene el efecto más fuerte sobre el logit (\(2.84\)) y las probabilidades (\(OR = 17.13\)), seguida por `visites_prev` (\(1.41\), \(OR = 4.10\)). La edad tiene un efecto positivo moderado, pero su interacción con el sexo masculino reduce el impacto del género con el paso de los años. Variables como `FEV^2` y `temps` tienen efectos positivos pequeños. Este análisis permite identificar los factores más importantes que influyen en las probabilidades de \(y\).
+
+
+---
+
+# Recuentos
+
+## 1. Ajustes de modelos
+
+### 1.1 Modelo de poisson
+
+**Ajuste**
+
+Ajustamos un modelo aditivo con todas las variables explicativas presentes en datos usando la familia *poisson*.
+
+```{r}
+summary(mod3.1 <- glm(n ~ visites_prev + sexe + FEV + edat + PAS + offset(logtemps), data = datos, family = poisson(link = "log")))
+```
+
+**Validación**
+
+Calculemos el estadístico de devianza.
+
+```{r}
+cat("El estadístico de la devianza:",mod3.1$deviance) 
+cat("Punto crítico: ",qchisq(0.95,mod3.1$df.res))
+cat("El p-valor del estadístico de la devianza ",1-pchisq(mod3.1$deviance,mod3.1$df.residual))
+```
+
+Observamos que tanto por el punto crítico ($546,8136<2122.64$) como por el p-valor ($0<0.05$) rechazamos la hipotesis nula $H_0:$"El modelo es válido" y por tanto el modelo no es válido. <br>
+
+**Sobredispersión**
+
+```{r}
+X2P <- sum(resid(mod3.1,type="pearson")^2)
+phi <- X2P/mod3.1$df.residual
+cat("Parámetro de dispersión:",phi)
+```
+
+El parámetro de sobredispersión es elevado. Realicemos ahora los tests pertinentes.
+
+```{r}
+dispersiontest(mod3.1, trafo = 1) 
+dispersiontest(mod3.1, trafo = 2)  
+```
+
+Deducimos que el modelo tiene dispersión: el parámetro está muy por encima del 1 y ambos tests dan significativos. <br>
+Tenemos entonces que, $V(Y)=\mu+\alpha\mu^2$ así que para corregirla ajustaremos un nuevo modelo con una binomial negativa.
+
+### 1.2 Modelo binomial negativa
+
+**Ajuste**
+
+```{r}
+summary(mod3.2  <- glm.nb(n ~ visites_prev + sexe + FEV + edat + PAS + offset(logtemps), data = datos))
+```
+
+**Validación**
+
+Estadísticos de Pearson y Devianza.
+
+```{r}
+# pearson
+cat("El estadístico de Pearson es",(X2P <- sum(resid(mod3.2,type="pearson")^2)))
+cat("El p-valor del estadístico de Pearson es",
+1-pchisq(X2P,mod3.2$df.residual))
+
+#devianza
+cat("El estadístico de la Devianza",mod3.2$deviance)
+cat("El p-valor del estadístico de Devianza es ",1-pchisq(mod3.2$deviance,mod3.2$df.residual))
+```
+
+Observamos los dos estadísticos son distintos y que dependiendo de cuál escojamos validaríamos o no el modelo. <br>
+
+**Sobredispersión**
+
+```{r}
+phi <- X2P/mod3.2$df.residual
+phi
+```
+
+El parámetro de sobredispersión es cercano a 1. 
+
+**Residuos**
+
+```{r}
+residualPlot(mod3.2)
+```
+
+Vemos un claro patrón, por ende no validamos este modelo y ajustaremos otro distinto a continuación (aunque la sobredispersión haya sido minimizada).
+
+### 1.3 Modelos cero inflados {.tabset}
+
+#### ZIP (poisson)
+
+**Ajuste**
+
+Poniendo el offset llegábamos a una divergencia del modelo.
+
+```{r, warning=FALSE}
+summary(mod3.3 <- glmmTMB(n ~ visites_prev + sexe + FEV + edat + PAS + temps, data = datos,
+                 zi=~ visites_prev + sexe + FEV + edat + PAS + temps, family = poisson))
+```
+
+Vemos que algunas variables no son significativas pero de momento no nos preocupamos por ellas.
+
+#### ZING (binomial negativa)
+
+**Ajuste**
+
+```{r}
+summary(mod3.4 <- glmmTMB(n ~ visites_prev + sexe + FEV + edat + PAS + offset(logtemps), data = datos,
+                 zi=~ visites_prev + sexe + FEV + edat + PAS + offset(logtemps), family = nbinom2))
+```
+
+Tal y como en el modelo *ZIP* vemos que podríamos eliminar algunas variables explicativas pero de momento no nos perocupamos por ello.
+
+### 1.5 Comparativa
+
+Con el objetivo de escoger el mejor modelo aditivo con todas las variables explicativas comparamos sus AIC y BIC.
+
+```{r}
+cbind(AIC(mod3.1,mod3.2,mod3.3,mod3.4),
+      BIC=BIC(mod3.1,mod3.2,mod3.3,mod3.4)[,2])
+```
+
+Comparando los grados de libertad y ambos estadísticos observamos que el mejor modelo es el *mod3.2*. Veamos en los siguientes apartados si conseguimos validar el dicho modelo seleccionando las variables estrictamente necesarias.
+
+## 2. Selección de variables
+
+Procederemos de forma similar como en la primera parte del informe sobre los modelos con respuesta binaria. Sin embargo, aquí partiremos del modelo aditivo con todas las variables explicativas salvo `PAS` que no es significativa.
+
+```{r}
+summary(mod4.1 <- glm.nb(n ~ visites_prev + sexe + FEV + edat + offset(logtemps), data = datos))
+```
+
+### 2.1 Variable *FEV*
+
+**Modelo con la variable contínua - mod4.1A**
+
+```{r}
+summary(mod4.1A  <- glm.nb(n ~ visites_prev + sexe + FEV + edat + offset(logtemps), data = datos))
+```
+
+**Modelo con la variable categorizada - mod4.1B**
+
+```{r}
+summary(mod4.1B  <- glm.nb(n ~ visites_prev + sexe + c.FEV + edat + offset(logtemps), data = datos))
+```
+
+Los distintos niveles de la variable `FEV` salen significativos.
+
+```{r}
+cld(emmeans(mod4.1B, ~c.FEV))
+```
+
+Observando el AIC de ambos modelos nos quedamos con el modelo con la variable contínua *mod4.1A*.
+
+**Validación gráfica**
+
+```{r}
+residualPlot(mod4.1A)
+```
+
+Vemos que podemos optar a probar transformaciones.
+
+**Modelos con transformaciones**
+
+**Modelo mod4.1C**
+```{r}
+summary(mod4.1C <- glm.nb(n ~ visites_prev + sexe + FEV + FEV2+ edat + offset(logtemps), data = datos))
+```
+
+**Modelo mod4.1D**
+```{r}
+summary(mod4.1D <- glm.nb(n ~ visites_prev + sexe + FEV + FEV2 + FEV3 + edat + offset(logtemps), data = datos))
+```
+
+**Modelo mod4.1E**
+```{r}
+summary(mod4.1E <- glm.nb(n ~ visites_prev + sexe + FEV2 + edat + offset(logtemps), data = datos))
+```
+
+**Modelo mod4.1F**
+```{r}
+summary(mod4.1F <- glm.nb(n ~ visites_prev + sexe + FEV3 + edat + offset(logtemps), data = datos))
+```
+
+**Comparación**
+
+```{r}
+cbind(AIC(mod4.1A,mod4.1B,mod4.1C,mod4.1D,mod4.1E,mod4.1F),
+      BIC=BIC(mod4.1A,mod4.1B,mod4.1C,mod4.1D,mod4.1E,mod4.1F)[,2])
+```
+
+Tanto según el AIC como el BIC nos lleva a escoger como modelo favorito el *mod4.1E*.
+
+**Validación numérica**
+
+```{r}
+mod4.1 <- mod4.1E
+Anova(mod4.1, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson",
+1-pchisq(sum(resid(mod4.1, 'pearson')^2),mod4.1$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de la Devianza",
+1-pchisq(mod4.1$dev,mod4.1$df.res))
+```
+
+Tanto con el estadístico de Pearson como con el de Devianza no podemos rechazar la hipótesis nula: ajusta bien los datos. <br>
+Validamos el modelo.
+
+### 2.2 Variable *edat*
+
+**Modelo con la variable contínua - mod4.2A**
+
+```{r}
+summary(mod4.2A  <- glm.nb(n ~ visites_prev + sexe + FEV2 + edat + offset(logtemps), data = datos))
+```
+
+**Modelo con la variable categorizada - mod4.2B**
+
+```{r}
+summary(mod4.2B  <- glm.nb(n ~ visites_prev + sexe + FEV2 + c.edat + offset(logtemps), data = datos))
+```
+
+Los distintos niveles de la variable `edat` son significativos.
+
+```{r}
+cld(emmeans(mod4.2B, ~c.edat))
+```
+
+Observando el AIC de ambos modelos nos quedamos con *mod4.2A*.
+
+**Validación gráfica**
+
+```{r}
+residualPlots(mod4.2A)
+```
+
+Para la variable `edat` no consideramos relevante considerar transformaciones.
+
+**Validación numérica**
+
+```{r}
+mod4.2 <- mod4.2A
+Anova(mod4.2, test.statistics = "LR")
+# estadístico de Pearson
+cat("El p-valor del estadístico de Pearson",
+1-pchisq(sum(resid(mod4.2, 'pearson')^2),mod4.2$df.res))
+# estadístico de la Devianza
+cat("El p-valor del estadístico de la Deviananza",
+1-pchisq(mod4.2$dev,mod4.2$df.res))
+```
+
+Tanto con el estadístico de Pearson como con el de Devianza no podemos rechazar la hipótesis nula $H_0$: Ajusta bien los datos. <br>
+Por tanto validamos el modelo.
+
+### 2.3 Otras variables e interacciones
+
+En el modelo anterior ya tenemos ambas variables categóricas incluídas. Por tanto nos queda ver las interacciones. <br>
+Para ello pondremos todas las interacciones dos a dos donde haya almenos una que sea un factor.
+
+**Todas las interacciones - mod4.3A**
+
+```{r}
+summary(mod4.3A <- glm.nb(n ~ visites_prev + sexe + FEV2 + edat+ offset(logtemps) +
+                           visites_prev:sexe + visites_prev:FEV2 + visites_prev:edat +
+                           sexe:FEV2 + sexe:edat, data = datos))
+```
+
+Nos quedamos únicamente con las significativas, es decir `visites_prev:sexe` y `sexe:edat`.
+
+**Modelo con interacciones significativas - mod4.3B**
+
+```{r}
+summary(mod4.3B <- glm.nb(n ~ visites_prev + sexe + FEV2 + edat+ offset(logtemps) +
+                           visites_prev:sexe + sexe:edat, data = datos))
+```
+
+Este es nuestro modelo definitivo (*mod4.3b*) que validaremos próximamente.
+
+## 3. Validación del modelo definitivo
+
+```{r}
+mod_rec <- mod4.3B # modelo final
+```
+
+### 3.1 Validación gráfica
+
+```{r}
+residualPlots(mod_rec, layout=c(3, 2))
+```
+
+Los dos primeros gráficos muestran una distribución centrada cerca de cero, aunque con algunos valores atípicos, lo cual es aceptable si no son predominantes.
+
+Los siguientes tres gráficos son dispersogramas de los residuos frente a `FEV2`, `edat` y el predictor lineal. Los residuos están mayormente dispersos alrededor de cero sin patrones claros, sugiriendo que el modelo no viola supuestos importantes como linealidad o independencia.
+
+En general, los residuos parecen estar bien distribuidos, sin tendencias sistemáticas, indicando que el modelo tiene un ajuste adecuado.
+
+```{r}
+residualPlot(mod_rec)
+```
+
+Aunque se observan ciertos patrones en los residuos de Pearson en los extremos, el modelo parece capturar adecuadamente la mayoría de la variabilidad dentro de un rango razonable.
+
+```{r}
+outlierTest(mod_rec)
+```
+El resultado indica que no hay residuos studentizados que sean estadísticamente significativos al nivel de Bonferroni ajustado. Esto sugiere que no hay valores atípicos severos que estén influyendo desproporcionadamente en el ajuste del modelo.
+
+El registro más grande de ∣rstudent∣ es el correspondiente al caso 34, con un valor de 2.67, y su p-valor sin ajustar es 0.0078. Sin embargo, después del ajuste por Bonferroni, el p-valor no es significativo, lo que confirma que este punto no representa un valor atípico problemático bajo este criterio. En resumen, el modelo parece robusto frente a valores atípicos.
+
+```{r}
+influenceIndexPlot(mod_rec,id=list(lab=row.names(datos),vars=c("Cook", "Student","hat"), n=5))
+```
+
+La gráfica muestra que algunas observaciones (como la 934 y la 149) tienen valores elevados de Cook's Distance y hat values, indicando influencia moderada, pero ninguna excede los umbrales típicos de preocupación. La mayoría de los residuos studentizados están dentro del rango aceptable.
+
+```{r}
+influencePlot(mod_rec)
+```
+
+La gráfica muestra que las observaciones 34, 149, y 2340 tienen altos valores de leverage (hat values) y residuos studentizados, indicando que son influyentes. Sin embargo, ninguna tiene un Cook's Distance lo suficientemente alto como para representar una amenaza significativa al modelo, como podemos ver en los resultados obtenidos. 
+
+
+### 3.2 Validación numérica
+
+```{r}
+Anova(mod_rec, test.statistics = "Wald")
+```
+
+El análisis de devianza muestra que todos los predictores principales (`visites_prev`, `sexe`, `FEV2` y `edat`) son altamente significativos (p<0.001), lo que indica que cada uno contribuye de manera importante al modelo. Además, las interacciones `visites_prev:sexe` (p=0.024) y `sexe:edat` (p=0.013) también resultaron significativas, lo que sugiere que estas relaciones entre variables afectan la respuesta de forma relevante.
+
+```{r}
+# estadístico de Pearson
+cat("El estadístico de Pearson es: ",
+(X2P <- sum(resid(mod3.2,type="pearson")^2)))
+cat("El p-valor del estadístico de Pearson",
+1-pchisq(sum(resid(mod_rec, 'pearson')^2),mod_rec$df.res))
+# estadístico de la Devianza
+cat("El estadístico de la Devianza",
+mod_rec$deviance)
+cat("El p-valor del estadístico de la Devianza",
+1-pchisq(mod_rec$deviance,mod_rec$df.res))
+# estadístico de dispersión
+cat("El estadístico de la dispersión",
+X2P/mod_rec$df.res)
+```
+
+El estadístico de Pearson indica que no hay evidencia de una mala adecuación del modelo, ya que el ajuste parece ser consistente con los datos observados. Esto es respaldado por el estadístico de la devianza y p-valor confirmando que no hay indicios de falta de ajuste significativo.
+
+Finalmente, el estadístico de dispersión tiene un valor cercano a 1, lo que sugiere que no hay problemas significativos de sobre o subdispersión en los datos. En conjunto, estas métricas respaldan que el modelo ajustado es adecuado y representa bien la estructura de los datos
+
+## 4. Predicción del modelo definitivo
+
+### 4.1 Capacidad predictiva
+
+```{r}
+pr <- predict(mod_rec,type='response')
+par(mfrow=c(1,2))
+plot(pr,datos$n,main="Escala aditiva",xlab='Predit',ylab='Observat');abline(0,1,col=2)
+plot(pr+0.1,datos$n+0.1,log='xy',main="Escala multiplicativa",xlab='Predit',ylab='Observat');abline(0,1,col=2)
+```
+
+En la escala aditiva, la dispersión significativa alrededor de la línea de identidad (diagonal roja) indica que el modelo no predice con precisión, especialmente para valores altos. En la escala multiplicativa, al usar ejes logarítmicos, se observa un patrón más claro en los valores bajos y altos.
+
+```{r}
+EQM <- sum((pr-datos$n)^2)/length(pr)
+cat("SME: ",sqrt(EQM))
+cat("SD: ",sd(datos$n))
+```
+Estos valores de Squared Mean Error y Standard Deviance indica que el modelo logra reducir la variabilidad inicial de los datos, pero no significativamente.
+
+
+### 4.2 Interpretaciones
+
+#### 4.2.1 Interpretación gráfica
+
+```{r}
+plot(allEffects(mod_rec))
+```
+La primera gráfica muestra que el efecto de `FEV2` sobre la variable dependiente n es positivo y aproximadamente lineal, indicando que mayores valores de `FEV2` se asocian con incrementos en n. La segunda (arriba derecha) refleja una interacción entre `visites_prev` y `sexe`, donde hombres con visitas previas (si) tienen valores más altos de n en comparación con mujeres. La tercera ilustra una interacción entre `sexe` y `edat`, evidenciando que el efecto de la edad sobre n es más pronunciado en mujeres que en hombres, especialmente en edades avanzadas.
+
+La segunda gráfica que muestra el efecto combinado entre `visites_prev` y `sexe` sobre la variable dependiente `n`. Se divide en dos paneles: uno para `sexe = dona` y otro para `sexe = home`.
+
+En el panel izquierdo (`sexe = dona`), se observa que el valor de `n` es mayor cuando `visites_prev = si` en comparación con `visites_prev = no`. Las barras verticales representan los intervalos de confianza, mostrando cierta variabilidad en ambas categorías.
+
+En el panel derecho (`sexe = home`), también se observa que el valor de `n` aumenta significativamente cuando `visites_prev = si` en comparación con `visites_prev = no`. Sin embargo, el incremento es más pronunciado que en `sexe = dona`.
+
+En resumen, el efecto de `visites_prev` sobre `n` es positivo en ambos casos, pero el impacto parece ser mayor en `sexe = home` en comparación con `sexe = dona`. Los intervalos de confianza indican que las estimaciones son consistentes dentro de los rangos mostrados.
+
+La última gráfica que muestra el efecto combinado entre `sexe` y `edat` sobre la variable dependiente `n`. Se divide en dos paneles: uno para `sexe = dona` y otro para `sexe = home`.
+
+En el panel izquierdo (`sexe = dona`), se observa una relación positiva entre `edat` y `n`, donde a medida que aumenta `edat`, también lo hace el valor de `n`. La franja azul claro representa el intervalo de confianza, que se amplía hacia los extremos, indicando mayor incertidumbre en las estimaciones a edades más avanzadas.
+
+En el panel derecho (`sexe = home`), la relación entre `edat` y `n` es más tenue, con un incremento leve en `n` a medida que aumenta `edat`. La franja de confianza también es más amplia, lo que sugiere mayor variabilidad en los datos.
+
+Así pues, el efecto de `edat` sobre `n` es más fuerte y pronunciado en `sexe = dona` en comparación con `sexe = home`, donde el impacto es menor y más uniforme. Los intervalos de confianza reflejan una mayor incertidumbre en los extremos del rango de edades.
+
+#### 4.2.2 Interpretación numérica
+
+```{r}
+coef(mod_rec)
+```
+
+Tenemos en el predictor lineal,
+
+\[
+\begin{align}
+log(n/temps)=&-12.9+0.910visites_{prev}+0.812sexe_{home}+0.000310FEV^2+0.0255edat\\
+&+0.970visites_{prev}:sexe_{home}-0.0196sexe_{home}:edat
+\end{align}
+\]
+Así pues para obtener nuestras estimaciones debemos elevar los coeficientes con la exponencial.
+
+Por ejemplo, dos posibles interpretaciones son: 
+
+1.Efecto de `visites_prev` (cuando `sexehome` = 0): El coeficiente asociado a `visites_prev`=si es 0.910. Esto significa que, para mujeres (`sexehome` = 0), tener visitas previas (`visites_prev` = si) incrementa el valor esperado en un factor de $exp(0.910)≈2.48$, es decir, las mujeres con visitas previas tienen aproximadamente 2.48 veces más que aquellas sin visitas previas.
+
+2.Interacción entre `visites_prev` y `sexehome`: El coeficiente de la interacción `visites_prevsi:sexehome` es 0.970. Esto indica que, para hombres con visitas previas (visites_prev = si y sexehome = 1), el incremento debido a visites_prev es aún mayor, dado por $exp(0.910+0.970)≈6.63$. Así, los hombres con visitas previas tienen un valor esperado aproximadamente 6.63 veces mayor que aquellos sin visitas previas.
+
+---
+
+# Conclusiones
+
+## 1. Resumen de resultados
+
+Todo el desarrollo para obtener el modelo final en cada apartado ya ha sido presentado. A continuación no hay información nueva, sólo un resumen de los datos más importantes, sobre los cuáles se ha rigido nuestro criterio de elección.
+
+### 1.1 Resultados respuesta binaria {.tabset}
+
+#### a) Tabla resumen
+
+```{r,message=FALSE}
+# Función para obtener los valores deseados para cada modelo
+get_model_stats <- function(model, final_model = FALSE) {
+  model_formula <- deparse(formula(model))
+  num_parameters <- length(coef(model))  # Número de parámetros
+  deviance_residual <- model$deviance   # Devianza residual
+  aic_value <- AIC(model)                # AIC
+  bic_value <- BIC(model)                # BIC
+  
+  # Pseudo-R2
+  pseudo_r2 <- 1 - deviance_residual / model$null.deviance 
+  
+  # AUC
+  auc_value <- NA
+  if (final_model) {
+    probs <- predict(model, type = "response")
+    roc_curve <- roc(datos$y, probs)
+    auc_value <- auc(roc_curve)  # AUC
+  }
+  
+  # Devolvemos un dataframe con la información
+  return(data.frame(
+    Model = deparse(substitute(model)),
+    Formula = model_formula,
+    Num_Parameters = num_parameters,
+    Deviance_Residual = deviance_residual,
+    AIC = aic_value,
+    BIC = bic_value,
+    Pseudo_R2 = pseudo_r2,
+    AUC = auc_value
+  ))
+}
+
+model_stats0 <- get_model_stats(mod0)
+model_stats01 <- get_model_stats(mod0.1)
+model_stats11A <- get_model_stats(mod1.1A)
+model_stats11B <- get_model_stats(mod1.1B)
+model_stats11C <- get_model_stats(mod1.1C)
+model_stats11D <- get_model_stats(mod1.1D)
+model_stats11E <- get_model_stats(mod1.1E)
+model_stats11F <- get_model_stats(mod1.1F)
+model_stats12A <- get_model_stats(mod1.2A)
+model_stats12B <- get_model_stats(mod1.2B)
+model_stats13A <- get_model_stats(mod1.3A)
+model_stats13B <- get_model_stats(mod1.3B)
+model_stats14A <- get_model_stats(mod1.4A)
+model_stats22 <- get_model_stats(mod2.2)
+model_stats23 <- get_model_stats(mod2.3)
+model_stats_final <- get_model_stats(mod_bn, final_model = TRUE)
+
+model_stats <- rbind(model_stats0,
+                     model_stats01,
+                     model_stats11A, model_stats11B, model_stats11C, model_stats11D, model_stats11E, model_stats11F,
+                     model_stats12A, model_stats12B,
+                     model_stats13A, model_stats13B,
+                     model_stats14A,
+                     model_stats22,
+                     model_stats23,
+                     model_stats_final)
+
+print(model_stats)
+```
+
+#### b) Gráfico de validación
+
+```{r}
+calibration_plot(mod_bn,datos)
+```
+
+#### c) Expresión del modelo
+
+```{r}
+summary(mod_bn)
+```
+
+### 1.2 Resultados recuentos {.tabset}
+
+#### a) Tabla resumen
+
+```{r}
+# Función para obtener los valores deseados para cada modelo
+get_model_stats <- function(model, final_model = FALSE) {
+  model_formula <- deparse(formula(model))
+  model_type <- NA 
+  num_parameters <- length(coef(model))
+  deviance_residual <- model$deviance   # Devianza residual
+  aic_value <- AIC(model)                # AIC
+  bic_value <- BIC(model)                # BIC
+  
+  if ("poisson" %in% family(model)$family) {
+    model_type <- "Poisson"
+  } else {
+    model_type <- "Binomial Negativo" 
+  }
+  
+  # Pseudo-R2
+  pseudo_r2 <- 1 - deviance_residual / model$null.deviance 
+  
+  # EQM
+  eqm_value <- NA
+  if (final_model) {
+    predictions <- predict(model, type = "response")
+    eqm_value <- mean((datos$n - predictions)^2, na.rm = TRUE)  # EQM de predicción
+  }
+  
+  # Devolvemos un dataframe con la información
+  return(data.frame(
+    Model = deparse(substitute(model)),
+    Model_Type = model_type,
+    Formula = model_formula,
+    Num_Parameters = num_parameters,
+    Deviance_Residual = deviance_residual,
+    AIC = aic_value,
+    BIC = bic_value,
+    Pseudo_R2 = pseudo_r2,
+    EQM = eqm_value
+  ))
+}
+
+model_stats31 <- get_model_stats(mod3.1)
+model_stats32 <- get_model_stats(mod3.2)
+model_stats33 <- data.frame(
+    Model = "mod3.3",
+    Model_Type = "ZIP",
+    Formula = deparse(formula(mod3.3)),
+    Num_Parameters = length(mod3.3$fit$par),
+    Deviance_Residual = NA,
+    AIC = AIC(mod3.3),
+    BIC = BIC(mod3.3),
+    Pseudo_R2 = NA,
+    EQM = NA
+  )
+model_stats34 <- data.frame(
+    Model = "mod3.4",
+    Model_Type = "ZING",
+    Formula = deparse(formula(mod3.4)),
+    Num_Parameters = length(mod3.4$fit$par),
+    Deviance_Residual = NA,
+    AIC = AIC(mod3.4),
+    BIC = BIC(mod3.4),
+    Pseudo_R2 = NA,
+    EQM = NA
+  )
+model_stats41A <- get_model_stats(mod4.1A)
+model_stats41B <- get_model_stats(mod4.1B)
+model_stats41C <- get_model_stats(mod4.1C)
+model_stats41D <- get_model_stats(mod4.1D)
+model_stats41E <- get_model_stats(mod4.1E)
+model_stats41F <- get_model_stats(mod4.1F)
+model_stats42A <- get_model_stats(mod4.2A)
+model_stats42B <- get_model_stats(mod4.2B)
+model_stats43A <- get_model_stats(mod4.3A)
+model_stats_final <- get_model_stats(mod_rec, final_model = TRUE)
+
+model_stats <- rbind(model_stats31,
+                     model_stats32,
+                     model_stats33,
+                     model_stats34,
+                     model_stats41A, model_stats41B, model_stats41C, model_stats41D, model_stats41E, model_stats41F,
+                     model_stats42A, model_stats42B,
+                     model_stats43A,
+                     model_stats_final)
+
+print(model_stats)
+```
+
+```{r}
+print(deparse(formula(mod3.3)))  # Verifica la fórmula
+cat("Número de parámetros:",length(mod3.3$fit$par))   # Verifica el número de parámetros
+```
+La devianza reasidual es:
+```{r}
+print(mod3.3$deviance)          # Verifica la deviancia residual
+cat("AIC:",AIC(mod3.3))              # Verifica el AIC
+cat("BIC",BIC(mod3.3))              # Verifica el BIC
+```
+
+
+#### b) Gráfico de validación
+
+```{r}
+residualPlot(mod_rec)
+```
+
+#### c) Expresión del modelo
+
+```{r}
+summary(mod_rec)
+```
+
+## 2. Conclusiones
+
+Los resultados indican que los pacientes con visitas médicas previas tienen un mayor riesgo de presentar este evento, lo que subraya la importancia de un seguimiento continuo y proactivo de estos pacientes. El género masculino se identificó como un factor de riesgo significativo, lo que sugiere que los hombres podrían requerir un monitoreo más cercano o intervenciones específicas para reducir su probabilidad de experimentar el evento. La edad también influye positivamente, aunque de manera más leve, indicando que el riesgo aumenta con el envejecimiento. Sin embargo, este efecto varía dependiendo del género, como lo demuestra la interacción significativa entre edad y género. Esto podría implicar la necesidad de estrategias preventivas diferenciadas según la edad y el género. Variables adicionales, como FEV y el tiempo, también mostraron asociaciones positivas con el evento. Aunque su impacto es más moderado, esto destaca la importancia de factores funcionales y temporales en el manejo clínico de los pacientes.
+
+Se encontró que los pacientes con visitas médicas previas presentan un mayor número de eventos, destacando la relevancia de su historial médico como indicador clave. Además, variables como la FEV y la edad también están asociadas con un aumento en los recuentos, lo que sugiere que el deterioro funcional y el envejecimiento juegan un papel importante en la frecuencia de estos eventos.El efecto positivo de las visitas previas es más marcado en ciertos subgrupos de género, mientras que la interacción entre género y edad mostró que el impacto del envejecimiento varía según el género, destacando la necesidad de enfoques personalizados para el manejo clínico.
+
+
+
